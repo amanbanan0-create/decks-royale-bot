@@ -8,6 +8,7 @@ from aiogram.types import (
     MenuButtonWebApp,
     WebAppInfo,
 )
+from extra_features import router as extra_router
 
 
 MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
@@ -45,6 +46,10 @@ def main_menu() -> InlineKeyboardMarkup:
 # Все уже зарегистрированные aiogram-обработчики обращаются к main_menu
 # через глобальное имя модуля main, поэтому достаточно заменить его здесь.
 original.main_menu = main_menu
+
+# Дополнительные команды из присланного проекта подключаем только как Router.
+# Важно: extra_features не запускает polling и не удаляет webhook.
+original.dp.include_router(extra_router)
 
 
 @original.app.on_event("startup")
