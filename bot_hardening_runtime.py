@@ -38,6 +38,22 @@ def _https_url(value: str) -> bool:
         return False
 
 
+def _safe_image_url(value: str) -> bool:
+    """Allow only HTTPS Clash Royale asset hosts; never follow arbitrary redirects."""
+    try:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return (
+            parsed.scheme == "https"
+            and bool(host)
+            and (host == "clashroyale.com" or host.endswith(".clashroyale.com"))
+            and parsed.username is None
+            and parsed.password is None
+        )
+    except Exception:
+        return False
+
+
 def validate_production_environment(original: Any, mini_app_url: str) -> None:
     """Reject insecure production configuration before Uvicorn starts serving traffic."""
     errors: list[str] = []
@@ -62,7 +78,7 @@ async def _get_image_client() -> httpx.AsyncClient:
         _image_client = httpx.AsyncClient(
             timeout=httpx.Timeout(20.0, connect=8.0),
             limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "ClashDecksBot/2.1"},
         )
     return _image_client
@@ -82,11 +98,10 @@ def _lock_for(key: str) -> asyncio.Lock:
         _image_locks[key] = lock
     else:
         _image_locks.move_to_end(key)
+    # Keep the lock registry strictly bounded. Removing an in-use lock from the
+    # registry is safe: holders retain their reference; at worst singleflight is
+    # temporarily lost for that URL, while memory remains bounded.
     while len(_image_locks) > _IMAGE_LOCK_LIMIT:
-        oldest, old_lock = next(iter(_image_locks.items()))
-        if old_lock.locked():
-            _image_locks.move_to_end(oldest)
-            break
         _image_locks.popitem(last=False)
     return lock
 
@@ -107,7 +122,7 @@ def apply_runtime_hardening(original: Any) -> None:
         card = original.merge_catalog_card(raw_card)
         card_name = card.get("name") or "Unknown card"
         normalized_name = original.normalize_card_name(card_name)
-        candidates = original.card_icon_candidates(raw_card)
+        candidates = [url for url in original.card_icon_candidates(raw_card) if _safe_image_url(url)]
         now = time.time()
 
         for url in candidates:
@@ -126,18 +141,33 @@ def apply_runtime_hardening(original: Any) -> None:
                 if cached:
                     return cached
                 try:
-                    response = await client.get(url)
-                    content_type = response.headers.get("content-type", "").lower()
-                    if response.status_code != 200:
-                        raise RuntimeError(f"image HTTP {response.status_code}")
-                    data = response.content
-                    if not data or len(data) > _IMAGE_MAX_BYTES:
-                        raise RuntimeError("image payload size rejected")
-                    if content_type and not content_type.startswith("image/"):
-                        raise RuntimeError("non-image content type")
-                    original.card_image_cache[url] = data
+                    async with client.stream("GET", url) as response:
+                        content_type = response.headers.get("content-type", "").lower()
+                        if response.status_code != 200:
+                            raise RuntimeError(f"image HTTP {response.status_code}")
+                        if content_type and not content_type.startswith("image/"):
+                            raise RuntimeError("non-image content type")
+
+                        content_length = response.headers.get("content-length")
+                        if content_length:
+                            try:
+                                if int(content_length) > _IMAGE_MAX_BYTES:
+                                    raise RuntimeError("image payload size rejected")
+                            except ValueError:
+                                pass
+
+                        data = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            if len(data) + len(chunk) > _IMAGE_MAX_BYTES:
+                                raise RuntimeError("image payload size rejected")
+                            data.extend(chunk)
+
+                    if not data:
+                        raise RuntimeError("empty image payload")
+                    result = bytes(data)
+                    original.card_image_cache[url] = result
                     original.card_image_bad_urls.pop(url, None)
-                    return data
+                    return result
                 except Exception as exc:
                     original.card_image_bad_urls[url] = time.time()
                     logging.info("Card image fetch failed for %s (%s): %s", card_name, url, type(exc).__name__)
