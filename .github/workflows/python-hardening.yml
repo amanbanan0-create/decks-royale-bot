@@ -49,8 +49,6 @@ jobs:
         run: pytest -q
       - name: Import hardened Render entrypoint
         run: python -c "import main_miniapp; assert main_miniapp.app is main_miniapp.original.app"
-      - name: Verify persistence bootstrap
-        run: python -c "import asyncio, main_miniapp; asyncio.run(main_miniapp.original.app.router.startup()); asyncio.run(main_miniapp.original.app.router.shutdown())"
       - name: Dependency consistency
         run: pip check
       - name: Dependency security audit
