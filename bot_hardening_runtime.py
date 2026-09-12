@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from fastapi.responses import JSONResponse
 
 _IMAGE_MAX_BYTES = 5 * 1024 * 1024
 _IMAGE_LOCK_LIMIT = 256
@@ -98,7 +100,7 @@ def _render_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
 
 
 def apply_runtime_hardening(original: Any) -> None:
-    """Patch image fetching and deck rendering with bounded shared resources."""
+    """Patch image fetching, diagnostics and deck rendering with bounded resources."""
 
     async def hardened_card_image_bytes(raw_card: Any) -> bytes | None:
         await original.ensure_cards_catalog()
@@ -176,6 +178,32 @@ def apply_runtime_hardening(original: Any) -> None:
     original.get_card_image_bytes = hardened_card_image_bytes
     original.build_deck_image = cached_bounded_build
 
-    @original.app.on_event("shutdown")
+    # Remove misleading "Ranked" visual labels when Top-100 falls back to Trophy Road.
+    base_replace = original.replace_with_deck_photo
+
+    async def honest_replace_with_deck_photo(*args: Any, **kwargs: Any):
+        mode_label = kwargs.get("mode_label")
+        if mode_label == "Meta / Ranked":
+            kwargs["mode_label"] = "Meta"
+        elif mode_label == "Top 100 / Ranked":
+            kwargs["mode_label"] = "Top 100"
+        return await base_replace(*args, **kwargs)
+
+    original.replace_with_deck_photo = honest_replace_with_deck_photo
+
+    diagnostics_secret = os.getenv("DIAGNOSTICS_SECRET", str(getattr(original, "WEBHOOK_SECRET", ""))).strip()
+
+    # This middleware is registered after the legacy hardening middleware, so it runs
+    # first and returns a real response instead of raising from inside middleware.
+    @original.app.middleware("http")
+    async def safe_diagnostics_guard(request, call_next):
+        if request.url.path in {"/api-status", "/api-test", "/webhook-status"}:
+            supplied = request.headers.get("x-diagnostics-secret", "")
+            if not diagnostics_secret or not hmac.compare_digest(supplied, diagnostics_secret):
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+
     async def close_runtime_resources() -> None:
         await _close_image_client()
+
+    original.app.router.on_shutdown.append(close_runtime_resources)
