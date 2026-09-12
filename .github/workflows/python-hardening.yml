@@ -45,10 +45,49 @@ jobs:
       - name: Compile all entrypoints
         run: python -m compileall -q main.py main_miniapp.py extra_features.py bot_hardening.py bot_hardening_runtime.py
       - name: Unit tests
-        run: pytest -q
+        id: unit
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee pytest-output.txt
       - name: Import hardened Render entrypoint
-        run: python -c "import main_miniapp; assert main_miniapp.app is main_miniapp.original.app"
+        id: import_smoke
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python -c "import main_miniapp; assert main_miniapp.app is main_miniapp.original.app" 2>&1 | tee import-output.txt
       - name: Dependency consistency
-        run: pip check
+        id: pip_check
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pip check 2>&1 | tee pip-check-output.txt
       - name: Dependency security audit
-        run: pip-audit -r requirements.txt
+        id: pip_audit
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pip-audit -r requirements.txt 2>&1 | tee pip-audit-output.txt
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-hardening-diagnostics
+          path: |
+            pytest-output.txt
+            import-output.txt
+            pip-check-output.txt
+            pip-audit-output.txt
+          retention-days: 3
+      - name: Enforce all checks
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.unit.outcome }}" = "success"
+          test "${{ steps.import_smoke.outcome }}" = "success"
+          test "${{ steps.pip_check.outcome }}" = "success"
+          test "${{ steps.pip_audit.outcome }}" = "success"
