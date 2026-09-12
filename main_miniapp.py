@@ -1,5 +1,6 @@
 import logging
 import os
+from types import MethodType
 
 import main as original
 from aiogram.types import (
@@ -20,6 +21,30 @@ _base_main_menu = original.main_menu
 # Fail closed before registering production lifecycle handlers. main remains untouched;
 # this wrapper is the Render entrypoint for the hardened branch.
 validate_production_environment(original, MINI_APP_URL)
+
+
+def _install_fastapi_lifecycle_compat() -> None:
+    """Keep the hardening layer compatible with newer FastAPI releases.
+
+    FastAPI 0.141 no longer exposes app.add_event_handler(), while the Starlette
+    router lifecycle lists remain the compatible hook used by the imported legacy app.
+    """
+    if hasattr(original.app, "add_event_handler"):
+        return
+
+    def add_event_handler(app, event_type: str, func) -> None:
+        if event_type == "startup":
+            app.router.on_startup.append(func)
+            return
+        if event_type == "shutdown":
+            app.router.on_shutdown.append(func)
+            return
+        raise ValueError(f"Unsupported lifecycle event: {event_type}")
+
+    original.app.add_event_handler = MethodType(add_event_handler, original.app)
+
+
+_install_fastapi_lifecycle_compat()
 
 
 def main_menu() -> InlineKeyboardMarkup:
