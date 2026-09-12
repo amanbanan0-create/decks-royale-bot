@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from types import MethodType
 
 import bot_hardening as hardening_state
@@ -19,9 +20,18 @@ MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
 _base_main_menu = original.main_menu
 
 
+def validate_telegram_webhook_secret(secret: str) -> None:
+    """Match Telegram Bot API secret_token constraints and keep a stronger minimum."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,256}", secret or ""):
+        raise RuntimeError(
+            "WEBHOOK_SECRET must be 16-256 characters using only A-Z, a-z, 0-9, _ and -"
+        )
+
+
 # Fail closed before registering production lifecycle handlers. main remains untouched;
 # this wrapper is the Render entrypoint for the hardened branch.
 validate_production_environment(original, MINI_APP_URL)
+validate_telegram_webhook_secret(str(original.WEBHOOK_SECRET))
 
 
 def _install_fastapi_lifecycle_compat() -> None:
