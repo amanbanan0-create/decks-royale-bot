@@ -68,6 +68,19 @@ def test_telegram_webhook_rejects_invalid_update_with_valid_secret():
     assert response.status_code == 400
 
 
+def test_webhook_secret_validator_matches_telegram_constraints():
+    main_miniapp = _load_hardened_wrapper()
+    main_miniapp.validate_telegram_webhook_secret("Abcdefghijkl_123")
+    for invalid in (
+        "too-short",
+        "contains spaces and is long enough",
+        "contains/slash/and-is-long-enough",
+        "A" * 257,
+    ):
+        with pytest.raises(RuntimeError, match="WEBHOOK_SECRET"):
+            main_miniapp.validate_telegram_webhook_secret(invalid)
+
+
 def test_production_startup_fails_closed_without_live_persistence(monkeypatch):
     main_miniapp = _load_hardened_wrapper()
     monkeypatch.setenv("DATABASE_URL", "postgresql://configured-but-unavailable/example")
