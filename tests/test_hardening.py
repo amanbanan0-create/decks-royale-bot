@@ -7,7 +7,7 @@ import pytest
 
 import bot_hardening
 from bot_hardening import _deck_token, _player_tag
-from bot_hardening_runtime import validate_production_environment
+from bot_hardening_runtime import _safe_image_url, validate_production_environment
 
 
 def valid_original():
@@ -40,6 +40,15 @@ def test_environment_accepts_secure_configuration(monkeypatch):
     validate_production_environment(valid_original(), "https://mini.example.com")
 
 
+def test_image_url_allowlist_blocks_redirect_ssrf_targets():
+    assert _safe_image_url("https://api-assets.clashroyale.com/cards/300/example.png")
+    assert _safe_image_url("https://clashroyale.com/example.png")
+    assert not _safe_image_url("http://api-assets.clashroyale.com/example.png")
+    assert not _safe_image_url("https://clashroyale.com.evil.example/example.png")
+    assert not _safe_image_url("https://127.0.0.1/internal")
+    assert not _safe_image_url("https://user:pass@api-assets.clashroyale.com/example.png")
+
+
 @dataclass
 class FakeDeck:
     id: int
@@ -49,6 +58,69 @@ class FakeDeck:
     win_rate: float
     games: int
     source: str = "manual"
+
+
+def test_persistent_favorites_coerce_legacy_set_assignment():
+    favorites = bot_hardening.PersistentFavorites()
+    favorites[123] = set()
+    assert isinstance(favorites[123], bot_hardening.PersistentFavoriteSet)
+    assert favorites[123].owner_id == 123
+
+
+def test_strict_python_deck_link_rejects_duplicates_and_bad_locale():
+    original = SimpleNamespace()
+    original.build_deck_link = lambda *_args, **_kwargs: "legacy"
+    original.merge_catalog_card = lambda card: card
+    original.CR_API_KEY = "key"
+    original.CR_API_BASE = "https://api.example.com"
+
+    class DummyMiddlewareTarget:
+        def outer_middleware(self, _middleware):
+            pass
+
+    class DummyDispatcher:
+        update = DummyMiddlewareTarget()
+
+        def callback_query(self, *_args, **_kwargs):
+            return lambda fn: fn
+
+    class DummyRouter:
+        on_startup = []
+        on_shutdown = []
+        routes = []
+
+    class DummyApp:
+        router = DummyRouter()
+
+        def add_event_handler(self, *_args):
+            pass
+
+        def middleware(self, *_args):
+            return lambda fn: fn
+
+        def post(self, *_args):
+            return lambda fn: fn
+
+    original.dp = DummyDispatcher()
+    original.app = DummyApp()
+    original.on_startup = object()
+    original.on_shutdown = object()
+    original.WEBHOOK_SECRET = "0123456789abcdef"
+    original.meta_decks_cache = []
+    original.top_players_cache = []
+    original.meta_keyboard = lambda: None
+    original.top100_keyboard = lambda _offset=0: None
+
+    bot_hardening.apply_hardening(original)
+
+    cards = [{"id": 26000000 + i} for i in range(8)]
+    assert original.build_deck_link(cards, "ru") == (
+        "https://link.clashroyale.com/deck/ru?deck="
+        "26000000;26000001;26000002;26000003;26000004;26000005;26000006;26000007"
+    )
+    duplicate = cards[:-1] + [{"id": 26000000}]
+    assert original.build_deck_link(duplicate) is None
+    assert original.build_deck_link(cards, "../../bad").startswith("https://link.clashroyale.com/deck/en?deck=")
 
 
 def test_postgres_persistence_round_trip():
@@ -67,6 +139,9 @@ def test_postgres_persistence_round_trip():
         assert bot_hardening._db_pool is not None
         await bot_hardening._db_pool.execute("TRUNCATE bot_user_favorites, bot_manual_decks")
 
+        # Mirror the actual legacy handler: it explicitly assigns set() for a
+        # first-time user before calling add(). The wrapper must coerce it.
+        first.favorites[123456] = set()
         first.favorites[123456].add(77)
         first.decks.append(
             FakeDeck(
@@ -78,7 +153,7 @@ def test_postgres_persistence_round_trip():
                 games=0,
             )
         )
-        await asyncio.sleep(0.15)
+        # No arbitrary sleep: close must flush tracked writes deterministically.
         await bot_hardening._close_persistence()
 
         second = SimpleNamespace(
