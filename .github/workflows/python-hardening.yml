@@ -43,6 +43,16 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Repository secret-file hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          tracked_env_files="$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.example$' || true)"
+          if [ -n "$tracked_env_files" ]; then
+            echo "Tracked environment files are forbidden:" >&2
+            echo "$tracked_env_files" >&2
+            exit 1
+          fi
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12.14"
@@ -53,7 +63,7 @@ jobs:
         run: python -m pip install pytest==9.1.1 pip-audit==2.10.1
       - name: Compile all entrypoints
         run: python -m compileall -q main.py main_miniapp.py extra_features.py bot_hardening.py bot_hardening_runtime.py
-      - name: Unit tests
+      - name: Unit and ASGI security tests
         run: python -m pytest -q
       - name: Import hardened Render entrypoint
         run: python -c "import main_miniapp; assert main_miniapp.app is main_miniapp.original.app"
