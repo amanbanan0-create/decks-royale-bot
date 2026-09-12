@@ -1,7 +1,9 @@
 import asyncio
 
 import httpx
+import pytest
 
+import bot_hardening
 import main_miniapp
 
 
@@ -43,3 +45,10 @@ def test_telegram_webhook_rejects_invalid_update_with_valid_secret():
         json={},
     )
     assert response.status_code == 400
+
+
+def test_production_startup_fails_closed_without_live_persistence(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://configured-but-unavailable/example")
+    monkeypatch.setattr(bot_hardening, "_db_pool", None)
+    with pytest.raises(RuntimeError, match="PostgreSQL persistence is unavailable"):
+        asyncio.run(main_miniapp.require_persistence_ready())
