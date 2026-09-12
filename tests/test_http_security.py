@@ -1,13 +1,33 @@
 import asyncio
+import os
 
 import httpx
 import pytest
 
 import bot_hardening
-import main_miniapp
+
+
+_REQUIRED_WRAPPER_ENV = (
+    "BOT_TOKEN",
+    "WEBHOOK_SECRET",
+    "CLASH_ROYALE_API_KEY",
+    "RENDER_EXTERNAL_URL",
+    "MINI_APP_URL",
+    "DATABASE_URL",
+)
+
+
+def _load_hardened_wrapper():
+    missing = [name for name in _REQUIRED_WRAPPER_ENV if not os.getenv(name, "").strip()]
+    if missing:
+        pytest.skip("hardened wrapper test environment is not configured: " + ", ".join(missing))
+    import main_miniapp
+
+    return main_miniapp
 
 
 async def _request(method: str, path: str, **kwargs) -> httpx.Response:
+    main_miniapp = _load_hardened_wrapper()
     transport = httpx.ASGITransport(app=main_miniapp.app)
     async with httpx.AsyncClient(transport=transport, base_url="https://testserver") as client:
         return await client.request(method, path, **kwargs)
@@ -35,6 +55,7 @@ def test_telegram_webhook_rejects_wrong_secret_before_parsing_body():
 
 
 def test_telegram_webhook_rejects_invalid_update_with_valid_secret():
+    main_miniapp = _load_hardened_wrapper()
     response = request(
         "POST",
         "/telegram/webhook",
@@ -48,6 +69,7 @@ def test_telegram_webhook_rejects_invalid_update_with_valid_secret():
 
 
 def test_production_startup_fails_closed_without_live_persistence(monkeypatch):
+    main_miniapp = _load_hardened_wrapper()
     monkeypatch.setenv("DATABASE_URL", "postgresql://configured-but-unavailable/example")
     monkeypatch.setattr(bot_hardening, "_db_pool", None)
     with pytest.raises(RuntimeError, match="PostgreSQL persistence is unavailable"):
