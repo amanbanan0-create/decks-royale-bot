@@ -12,8 +12,9 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
-from typing import Any
+from typing import Any, Coroutine
 
 import httpx
 from aiogram import BaseMiddleware, F
@@ -24,6 +25,7 @@ from fastapi import HTTPException, Request
 
 _api_client: httpx.AsyncClient | None = None
 _db_pool: Any | None = None
+_persistence_tasks: set[asyncio.Task[Any]] = set()
 _update_lock = asyncio.Lock()
 _update_inflight: set[int] = set()
 _update_processed: dict[int, float] = {}
@@ -44,6 +46,13 @@ def _deck_token(cards: list[Any]) -> str:
 
 def _player_tag(player: dict[str, Any]) -> str:
     return str(player.get("tag", "")).strip().lstrip("#").upper()[:20]
+
+
+def _spawn_persistence(coro: Coroutine[Any, Any, Any]) -> None:
+    """Track fire-and-forget DB writes so shutdown can flush them safely."""
+    task = asyncio.create_task(coro)
+    _persistence_tasks.add(task)
+    task.add_done_callback(_persistence_tasks.discard)
 
 
 async def _client() -> httpx.AsyncClient:
@@ -85,18 +94,32 @@ class PersistentFavoriteSet(set[int]):
     def add(self, value: int) -> None:
         super().add(value)
         if _db_pool is not None:
-            asyncio.create_task(_persist_favorite(self.owner_id, int(value), True))
+            _spawn_persistence(_persist_favorite(self.owner_id, int(value), True))
 
     def remove(self, value: int) -> None:
         super().remove(value)
         if _db_pool is not None:
-            asyncio.create_task(_persist_favorite(self.owner_id, int(value), False))
+            _spawn_persistence(_persist_favorite(self.owner_id, int(value), False))
+
+    def discard(self, value: int) -> None:
+        existed = value in self
+        super().discard(value)
+        if existed and _db_pool is not None:
+            _spawn_persistence(_persist_favorite(self.owner_id, int(value), False))
 
 
 class PersistentFavorites(dict[int, PersistentFavoriteSet]):
+    def __setitem__(self, key: int, value) -> None:
+        owner_id = int(key)
+        if isinstance(value, PersistentFavoriteSet) and value.owner_id == owner_id:
+            persistent = value
+        else:
+            persistent = PersistentFavoriteSet(owner_id, value or ())
+        dict.__setitem__(self, owner_id, persistent)
+
     def __missing__(self, key: int):
         value = PersistentFavoriteSet(int(key))
-        self[int(key)] = value
+        dict.__setitem__(self, int(key), value)
         return value
 
 
@@ -104,7 +127,7 @@ class PersistentDeckList(list[Any]):
     def append(self, deck: Any) -> None:
         super().append(deck)
         if _db_pool is not None and getattr(deck, "id", None) is not None:
-            asyncio.create_task(_persist_deck(deck))
+            _spawn_persistence(_persist_deck(deck))
 
 
 async def _persist_favorite(user_id: int, deck_id: int, present: bool) -> None:
@@ -221,6 +244,13 @@ async def _init_persistence(original: Any) -> None:
 
 async def _close_persistence() -> None:
     global _db_pool
+    # Flush writes spawned by synchronous set/list compatibility wrappers before
+    # closing the asyncpg pool. This removes the shutdown race present in the
+    # legacy process-local implementation.
+    pending = list(_persistence_tasks)
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    _persistence_tasks.clear()
     if _db_pool is not None:
         await _db_pool.close()
     _db_pool = None
@@ -228,6 +258,31 @@ async def _close_persistence() -> None:
 
 def apply_hardening(original: Any) -> None:
     """Apply runtime fixes before Uvicorn starts the imported FastAPI app."""
+
+    legacy_build_deck_link = original.build_deck_link
+
+    def hardened_build_deck_link(cards: list, locale: str = "en") -> str | None:
+        if not isinstance(cards, list) or len(cards) != 8:
+            return None
+        ids: list[int] = []
+        for raw in cards:
+            card = original.merge_catalog_card(raw)
+            try:
+                card_id = int(card.get("id"))
+            except (TypeError, ValueError):
+                return None
+            if card_id <= 0:
+                return None
+            ids.append(card_id)
+        if len(set(ids)) != 8:
+            return None
+        safe_locale = locale if re.fullmatch(r"[a-z]{2}(?:-[A-Z]{2})?", locale or "") else "en"
+        return f"https://link.clashroyale.com/deck/{safe_locale}?deck=" + ";".join(str(card_id) for card_id in ids)
+
+    # Keep a reference only for compatibility diagnostics; all production calls
+    # use the strict replacement below.
+    original.legacy_build_deck_link = legacy_build_deck_link
+    original.build_deck_link = hardened_build_deck_link
 
     async def hardened_cr_get(path: str, params: dict | None = None):
         if not original.CR_API_KEY:
