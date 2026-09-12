@@ -2,6 +2,7 @@ import logging
 import os
 from types import MethodType
 
+import bot_hardening as hardening_state
 import main as original
 from aiogram.types import (
     InlineKeyboardButton,
@@ -78,6 +79,13 @@ original.dp.include_router(extra_router)
 # Apply security/webhook/persistence fixes first, then the bounded image/render layer.
 apply_hardening(original)
 apply_runtime_hardening(original)
+
+
+@original.app.on_event("startup")
+async def require_persistence_ready() -> None:
+    """Fail startup if configured persistent storage could not be initialized."""
+    if os.getenv("DATABASE_URL", "").strip() and hardening_state._db_pool is None:
+        raise RuntimeError("DATABASE_URL is configured but PostgreSQL persistence is unavailable")
 
 
 @original.app.on_event("startup")
