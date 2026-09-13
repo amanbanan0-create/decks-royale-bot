@@ -2,7 +2,7 @@ name: Python bot hardening checks
 
 on:
   push:
-    branches: [v2.1-hardening, main]
+    branches: [v2.1-hardening, main, fix/world-ranking-cards]
   pull_request:
     branches: [main]
   workflow_dispatch:
