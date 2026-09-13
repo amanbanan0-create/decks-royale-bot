@@ -6,6 +6,7 @@ from types import MethodType
 import bot_hardening as hardening_state
 import main as original
 from aiogram.types import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     MenuButtonWebApp,
@@ -113,6 +114,30 @@ async def configure_mini_app_menu_button() -> None:
         logging.info("Telegram Mini App menu button set: %s", MINI_APP_URL)
     except Exception:
         logging.exception("Failed to set Telegram Mini App menu button")
+
+
+@original.app.on_event("startup")
+async def configure_bot_commands() -> None:
+    """Expose the safe shortcuts in Telegram's slash-command menu."""
+    default_commands = [
+        BotCommand(command="start", description="Open the main menu"),
+        BotCommand(command="decks", description="Live decks and challenges"),
+        BotCommand(command="top", description="Path of Legends Top 10"),
+        BotCommand(command="lab", description="Open the Clash Decks Mini App"),
+    ]
+    russian_commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="decks", description="Мета-колоды и испытания"),
+        BotCommand(command="top", description="Топ-10 Path of Legends"),
+        BotCommand(command="lab", description="Открыть Clash Decks Mini App"),
+    ]
+    try:
+        await original.bot.set_my_commands(default_commands)
+        await original.bot.set_my_commands(russian_commands, language_code="ru")
+        logging.info("Telegram bot commands configured")
+    except Exception:
+        # Command-menu configuration is UX-only and must not take the webhook down.
+        logging.exception("Failed to configure Telegram bot commands")
 
 
 app = original.app
