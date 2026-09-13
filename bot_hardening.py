@@ -495,7 +495,7 @@ def apply_hardening(original: Any) -> None:
             return
         deck = player.get("recent_deck") or []
         if len(deck) != 8:
-            await callback.answer("В последних боях игрока не нашлась полная Ranked-колода.", show_alert=True)
+            await callback.answer("Последняя колода пока недоступна.", show_alert=True)
             return
         index = original.top_players_cache.index(player)
         offset = (index // 10) * 10
@@ -507,6 +507,7 @@ def apply_hardening(original: Any) -> None:
             f"🏷 <code>{original.escape(str(player.get('tag', '')))}</code>\n"
             f"📅 {original.escape(original.leaderboard_source_label)}"
         )
+        caption += "\n" + original.escape(original.deck_provenance(player))
         link = original.build_deck_link(deck)
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=original.deck_action_rows(deck_link=link, back_callback=f"top100:{offset}")
@@ -518,7 +519,7 @@ def apply_hardening(original: Any) -> None:
             subtitle=original.player_rating_text(player),
             caption=caption,
             reply_markup=keyboard,
-            mode_label="Top 100 / Ranked",
+            mode_label="Top 100 / " + str(player.get("recent_deck_mode", "1v1")),
             source_label=original.leaderboard_source_label,
             season_id=original.leaderboard_season_id,
             tower_troop="Tower Troop: —",

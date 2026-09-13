@@ -1,3 +1,4 @@
+from deck_inference import extract_player_decks, normalized_name, deck_provenance
 import asyncio
 import logging
 import os
@@ -262,7 +263,7 @@ def safe_int(value, default: int = 0) -> int:
 
 
 def normalize_card_name(name: str) -> str:
-    return str(name or "").strip().lower()
+    return normalized_name(name)
 
 
 def normalize_card(raw) -> dict:
@@ -346,13 +347,13 @@ def deck_signature(cards: list) -> tuple[str, ...]:
         card = normalize_card(raw)
         name = card["name"]
         if name:
-            tokens.append(f"{name.lower()}::{card_special_kind(card)}")
+            tokens.append(f"{card.get('id') or normalized_name(name)}::{card_special_kind(card)}")
     return tuple(sorted(tokens))
 
 
 def merge_catalog_card(raw_card) -> dict:
     card = normalize_card(raw_card)
-    catalog = cards_catalog_cache.get(normalize_card_name(card["name"]))
+    catalog = next((c for c in cards_catalog_cache.values() if card.get("id") and c.get("id") == card["id"]), None) or cards_catalog_cache.get(normalize_card_name(card["name"]))
 
     if not catalog:
         return card
@@ -391,7 +392,7 @@ def card_icon_candidates(raw_card) -> list[str]:
     а также варианты из общего каталога /cards.
     """
     raw = normalize_card(raw_card)
-    catalog = cards_catalog_cache.get(normalize_card_name(raw["name"])) or {}
+    catalog = next((c for c in cards_catalog_cache.values() if raw.get("id") and c.get("id") == raw["id"]), None) or cards_catalog_cache.get(normalize_card_name(raw["name"])) or {}
     kind = card_special_kind(raw)
 
     if kind == "hero":
@@ -720,59 +721,11 @@ async def fetch_player_battlelog(player_tag: str) -> list[dict]:
     return await cr_get(f"/players/%23{encoded_tag}/battlelog")
 
 
-def extract_decks_from_battlelog(
-    battlelog: list[dict],
-    player_tag: str,
-) -> list[dict]:
-    """
-    Возвращает недавние 1v1 Ranked/PvP колоды игрока вместе с результатом.
-    """
-    player_tag = player_tag.lstrip("#").upper()
-    extracted: list[dict] = []
-
-    for battle in battlelog or []:
-        battle_type = str(battle.get("type", "")).lower()
-
-        if battle_type not in {"pathoflegend", "pvp"}:
-            continue
-
-        team = battle.get("team") or []
-        opponent = battle.get("opponent") or []
-
-        if len(team) != 1 or len(opponent) != 1:
-            continue
-
-        chosen = team[0]
-        chosen_tag = str(chosen.get("tag", "")).lstrip("#").upper()
-        if chosen_tag != player_tag:
-            continue
-
-        cards = [
-            normalize_card(card)
-            for card in (chosen.get("cards") or [])
-            if isinstance(card, dict) and card.get("name")
-        ]
-        if len(cards) != 8:
-            continue
-
-        my_crowns = int(chosen.get("crowns", 0) or 0)
-        enemy_crowns = int(opponent[0].get("crowns", 0) or 0)
-
-        if my_crowns > enemy_crowns:
-            result = "win"
-        elif my_crowns < enemy_crowns:
-            result = "loss"
-        else:
-            result = "draw"
-
-        extracted.append({
-            "cards": cards,
-            "result": result,
-            "battle_type": battle_type,
-            "battle_time": battle.get("battleTime"),
-        })
-
-    return extracted
+def extract_decks_from_battlelog(battlelog: list[dict], player_tag: str) -> list[dict]:
+    rows = extract_player_decks(battlelog, player_tag)
+    for row in rows:
+        row["cards"] = [normalize_card(c) for c in row["cards"]]
+    return rows
 
 
 async def refresh_live_data() -> tuple[int, int]:
@@ -785,6 +738,8 @@ async def refresh_live_data() -> tuple[int, int]:
         players = await fetch_top_100_players()
 
         deck_stats: dict[tuple[str, ...], dict] = {}
+        observed_sides = set()
+        previous = {str(p.get("tag", "")).upper(): p for p in top_players_cache}
         semaphore = asyncio.Semaphore(8)
 
         async def load_player(index: int, player: dict) -> dict:
@@ -803,9 +758,21 @@ async def refresh_live_data() -> tuple[int, int]:
 
                 if rows:
                     item["recent_deck"] = rows[0]["cards"]
+                    item["recent_deck_at"] = rows[0]["battle_at"]
+                    item["recent_deck_source"] = "battlelog"
+                    item["recent_deck_mode"] = rows[0]["battle_type"]
+                    item["recent_deck_stale"] = False
 
                 if index < 30:
                     for row in rows:
+                        if row["battle_type"] != "pathoflegend":
+                            continue
+                        if time.time() - row["_timestamp"] > 14 * 86400:
+                            continue
+                        side_key = (row["battle_key"], tag.upper())
+                        if side_key in observed_sides:
+                            continue
+                        observed_sides.add(side_key)
                         signature = deck_signature(row["cards"])
                         stat = deck_stats.setdefault(
                             signature,
@@ -826,7 +793,17 @@ async def refresh_live_data() -> tuple[int, int]:
                             stat["draws"] += 1
 
             except Exception:
-                logging.exception("Не удалось получить battlelog игрока %s", tag)
+                old = previous.get(tag.upper(), {})
+                if old.get("recent_deck") and old.get("recent_deck_at"):
+                    try:
+                        age = datetime.now(timezone.utc) - datetime.fromisoformat(old["recent_deck_at"])
+                        if age.total_seconds() <= 86400:
+                            for key in ("recent_deck", "recent_deck_at", "recent_deck_source", "recent_deck_mode"):
+                                item[key] = old[key]
+                            item["recent_deck_stale"] = True
+                    except (ValueError, KeyError):
+                        pass
+                logging.warning("Battlelog unavailable for player %s", tag)
 
             return item
 
@@ -2046,7 +2023,7 @@ async def player_deck_detail(callback: CallbackQuery):
 
     if len(deck) != 8:
         await callback.answer(
-            "В последних боях игрока не нашлась полная Ranked-колода.",
+            "Последняя колода пока недоступна.",
             show_alert=True,
         )
         return
@@ -2064,6 +2041,7 @@ async def player_deck_detail(callback: CallbackQuery):
         f"📅 {escape(leaderboard_source_label)}"
     )
 
+    caption += "\n" + escape(deck_provenance(player))
     deck_link = build_deck_link(deck)
     kb = InlineKeyboardMarkup(
         inline_keyboard=deck_action_rows(
