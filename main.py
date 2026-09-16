@@ -322,18 +322,14 @@ def card_special_kind(raw_card) -> str:
     форм. Для отображения:
       0 -> base
       1 -> Evolution
-      2+ -> Hero
+      2 -> Hero; unknown values retain base artwork
     Если API изменит поля, обычная иконка всё равно останется рабочей.
     """
     card = normalize_card(raw_card)
     level = card["evolutionLevel"]
-    icons = card.get("iconUrls") or {}
-
-    if level >= 2 and icons.get("heroMedium"):
+    if level == 2:
         return "hero"
-    if level >= 2:
-        return "hero"
-    if level >= 1:
+    if level == 1:
         return "evo"
     return "base"
 
@@ -396,11 +392,11 @@ def card_icon_candidates(raw_card) -> list[str]:
     kind = card_special_kind(raw)
 
     if kind == "hero":
-        preferred_keys = ("heroMedium", "evolutionMedium", "medium")
+        preferred_keys = ("heroMedium", "medium")
     elif kind == "evo":
-        preferred_keys = ("evolutionMedium", "medium", "heroMedium")
+        preferred_keys = ("evolutionMedium", "medium")
     else:
-        preferred_keys = ("medium", "evolutionMedium", "heroMedium")
+        preferred_keys = ("medium",)
 
     sources = []
 
@@ -417,12 +413,6 @@ def card_icon_candidates(raw_card) -> list[str]:
     for key in preferred_keys:
         for icons in sources:
             url = icons.get(key)
-            if isinstance(url, str) and url and url not in candidates:
-                candidates.append(url)
-
-    # Последний fallback: любой URL из iconUrls, который ещё не пробовали.
-    for icons in sources:
-        for url in icons.values():
             if isinstance(url, str) and url and url not in candidates:
                 candidates.append(url)
 
@@ -729,123 +719,31 @@ def extract_decks_from_battlelog(battlelog: list[dict], player_tag: str) -> list
 
 
 async def refresh_live_data() -> tuple[int, int]:
+    """The Mini App owns persisted competitive data; Python owns Telegram only."""
+    from competitive_client import fetch_competitive
     global top_players_cache, meta_decks_cache, cache_updated_at
-
-    if not api_is_ready():
-        return 0, 0
-
+    global leaderboard_season_id, leaderboard_source_label
     async with refresh_lock:
-        players = await fetch_top_100_players()
-
-        deck_stats: dict[tuple[str, ...], dict] = {}
-        observed_sides = set()
-        previous = {str(p.get("tag", "")).upper(): p for p in top_players_cache}
-        semaphore = asyncio.Semaphore(8)
-
-        async def load_player(index: int, player: dict) -> dict:
-            item = dict(player)
-            tag = str(player.get("tag", ""))
-            item["recent_deck"] = []
-
-            if not tag:
-                return item
-
-            try:
-                async with semaphore:
-                    battles = await fetch_player_battlelog(tag)
-
-                rows = extract_decks_from_battlelog(battles, tag)
-
-                if rows:
-                    item["recent_deck"] = rows[0]["cards"]
-                    item["recent_deck_at"] = rows[0]["battle_at"]
-                    item["recent_deck_source"] = "battlelog"
-                    item["recent_deck_mode"] = rows[0]["battle_type"]
-                    item["recent_deck_stale"] = False
-
-                if index < 30:
-                    for row in rows:
-                        if row["battle_type"] != "pathoflegend":
-                            continue
-                        if time.time() - row["_timestamp"] > 14 * 86400:
-                            continue
-                        side_key = (row["battle_key"], tag.upper())
-                        if side_key in observed_sides:
-                            continue
-                        observed_sides.add(side_key)
-                        signature = deck_signature(row["cards"])
-                        stat = deck_stats.setdefault(
-                            signature,
-                            {
-                                "games": 0,
-                                "wins": 0,
-                                "losses": 0,
-                                "draws": 0,
-                                "cards": row["cards"],
-                            },
-                        )
-                        stat["games"] += 1
-                        if row["result"] == "win":
-                            stat["wins"] += 1
-                        elif row["result"] == "loss":
-                            stat["losses"] += 1
-                        else:
-                            stat["draws"] += 1
-
-            except Exception:
-                old = previous.get(tag.upper(), {})
-                if old.get("recent_deck") and old.get("recent_deck_at"):
-                    try:
-                        age = datetime.now(timezone.utc) - datetime.fromisoformat(old["recent_deck_at"])
-                        if age.total_seconds() <= 86400:
-                            for key in ("recent_deck", "recent_deck_at", "recent_deck_source", "recent_deck_mode"):
-                                item[key] = old[key]
-                            item["recent_deck_stale"] = True
-                    except (ValueError, KeyError):
-                        pass
-                logging.warning("Battlelog unavailable for player %s", tag)
-
-            return item
-
-        enriched_players = await asyncio.gather(
-            *(load_player(i, player) for i, player in enumerate(players[:100]))
-        )
-
-        meta = []
-        for signature, stat in deck_stats.items():
-            decisive = stat["wins"] + stat["losses"]
-            win_rate = round(stat["wins"] / decisive * 100, 1) if decisive else None
-
-            meta.append({
-                "cards": stat["cards"],
-                "games": stat["games"],
-                "wins": stat["wins"],
-                "losses": stat["losses"],
-                "draws": stat["draws"],
-                "win_rate": win_rate,
-                "source": "Supercell API / Top 30 Ranked players",
-            })
-
-        meta.sort(
-            key=lambda x: (
-                x["games"],
-                x["win_rate"] if x["win_rate"] is not None else -1,
-            ),
-            reverse=True,
-        )
-
-        top_players_cache = enriched_players
-        meta_decks_cache = meta[:20]
-        cache_updated_at = datetime.now(timezone.utc)
-
-        return len(top_players_cache), len(meta_decks_cache)
+        try:
+            players, meta, updated_at, season = await fetch_competitive(os.getenv("MINI_APP_URL", ""))
+        except Exception:
+            # Do not leave an old in-memory sample looking live after refresh failure.
+            meta_decks_cache = []
+            for player in top_players_cache:
+                player["recent_deck_stale"] = True
+            raise
+        top_players_cache, meta_decks_cache = players, meta
+        leaderboard_season_id = season
+        leaderboard_source_label = "Top 1000 World · ranked observations"
+        cache_updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00")) if updated_at else None
+        return len(players), len(meta)
 
 
 async def data_refresh_loop():
     # При старте пытаемся заполнить данные. Ошибка API не должна уронить веб-сервис.
     while True:
         try:
-            if api_is_ready():
+            if os.getenv("MINI_APP_URL"):
                 top_count, meta_count = await refresh_live_data()
                 logging.info(
                     "Live data refreshed: top=%s, meta_decks=%s",
@@ -854,7 +752,7 @@ async def data_refresh_loop():
                 )
             else:
                 logging.warning(
-                    "CLASH_ROYALE_API_KEY не задан — используются тестовые данные."
+                    "MINI_APP_URL не задан — competitive данные недоступны."
                 )
         except Exception:
             logging.exception("Live data refresh failed")
@@ -1812,7 +1710,7 @@ async def meta(callback: CallbackQuery):
 
     msg = (
         "🔥 <b>АКТУАЛЬНАЯ МЕТА</b>\n\n"
-        "Выборка: последние 1v1 бои топ-30 игроков Ranked.\n"
+        "Выборка: валидные Ranked-бои World Top-1000. Usage и WR рассчитаны только по этой выборке.\n"
         "Нажми на колоду — откроется превью с игровыми иконками, "
         "EVO/HERO и уровнями.\n\n"
         f"🕒 Обновлено: {format_last_updated()}"

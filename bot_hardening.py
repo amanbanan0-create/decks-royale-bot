@@ -441,6 +441,10 @@ def apply_hardening(original: Any) -> None:
             f"🔥 <b>Мета #{index + 1}</b>\n"
             f"📈 Win rate: <b>{wr}</b>\n"
             f"⚔️ Матчей в выборке: <b>{item['games']}</b>\n"
+            f"✅ Победы: <b>{item.get('wins', '—')}</b> · Usage: <b>{item.get('usage', '—')}%</b>\n"
+            f"🌍 Лучшее наблюдаемое место: <b>#{item.get('best_world_rank') or '—'}</b>\n"
+            f"Top 1000 World · sample {item.get('sample_size', '—')}\n"
+            f"{'Сохранённые данные · ' if item.get('stale') else ''}{original.escape(item.get('as_of') or 'Время недоступно')}\n"
             f"📅 Сезон: <b>{original.escape(original.leaderboard_season_id or 'текущий')}</b>\n"
             f"🕒 {original.format_last_updated()}"
         )
