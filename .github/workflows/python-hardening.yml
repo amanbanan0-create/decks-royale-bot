@@ -2,7 +2,7 @@ name: Python bot hardening checks
 
 on:
   push:
-    branches: [v2.1-hardening, main, fix/world-ranking-cards]
+    branches: [v2.1-hardening, main, fix/world-ranking-cards, feat/top1000-slots-events]
   pull_request:
     branches: [main]
   workflow_dispatch:
