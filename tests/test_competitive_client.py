@@ -20,6 +20,13 @@ class CompetitiveClientTests(unittest.TestCase):
             rows = parse_competitive_payload({"source": "world_top_1000", "decks": [{**self.deck, **change}]}, {})
             self.assertEqual(rows, [])
 
+    def test_minimum_sample_boundary(self):
+        for battles, expected in ((69, 0), (70, 1), (71, 1)):
+            with self.subTest(battles=battles):
+                deck = {**self.deck, "stats": {"games": battles, "wins": 56, "losses": battles - 56}}
+                rows = parse_competitive_payload({"source": "world_top_1000", "decks": [deck]}, {})
+                self.assertEqual(len(rows), expected)
+
     def test_unknown_official_and_selected_forms(self):
         forms = [{"key": self.keys[0], "form": "evolution"}, {"key": self.keys[1], "form": "hero"}]
         cards = api_cards(self.keys, {}, forms)
