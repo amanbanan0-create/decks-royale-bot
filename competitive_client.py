@@ -36,7 +36,7 @@ def parse_competitive_payload(payload, catalog):
         games, wins, losses = stats.get("games"), stats.get("wins"), stats.get("losses")
         if not cards or any(not isinstance(n, int) or isinstance(n, bool) for n in (games, wins, losses)):
             continue
-        if games <= 0 or min(wins, losses) < 0 or wins + losses > games:
+        if games < 70 or min(wins, losses) < 0 or wins + losses > games:
             continue
         result.append({"cards": cards, "games": games, "wins": wins, "losses": losses,
                        "draws": games - wins - losses, "win_rate": round(wins / games * 100, 1),
